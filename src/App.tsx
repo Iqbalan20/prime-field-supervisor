@@ -810,6 +810,7 @@ function SupervisorApp({ data, persist, session, onLogout, notify }) {
           {tab === "incidents" && <SupIncidentForm data={data} persist={persist} sup={sup} mySites={mySites} notify={notify} goHome={() => setTab("home")} />}
           {tab === "report" && <SupDailyReport data={data} persist={persist} sup={sup} mySites={mySites} notify={notify} goHome={() => setTab("home")} />}
           {tab === "requirements" && <SupRequirements data={data} sup={sup} />}
+          {tab === "labour" && <SupLabourMaster data={data} persist={persist} sup={sup} notify={notify} />}
           {tab === "myattendance" && <SupOwnAttendance data={data} sup={sup} />}
           {tab === "profile" && <SupProfile data={data} sup={sup} />}
         </div>
@@ -820,6 +821,7 @@ function SupervisorApp({ data, persist, session, onLogout, notify }) {
             ["home", "Home", "⌂"],
             ["requirements", "Jobs", "▣"],
             ["myattendance", "Hours", "◷"],
+            ["labour", "ESIC/EPF", "✓"],
             ["profile", "Profile", "◍"],
           ].map(([key, label, icon]) => (
             <button
@@ -857,6 +859,7 @@ function SupHome({ data, mySites, openVisit, goTo, onStartVisit }) {
     { key: "incidents", label: "Report incident", tone: "ghost" },
     { key: "report", label: "Daily report", tone: "ghost" },
     { key: "requirements", label: "Current requirements", tone: "ghost" },
+    { key: "labour", label: "ESIC / EPF (my labour)", tone: "ghost" },
     { key: "myattendance", label: "My attendance & hours", tone: "ghost" },
   ];
   return (
@@ -1360,6 +1363,34 @@ function SupRequirements({data, sup}) {
         <div style={{fontSize:11.5,color:COLORS.inkMute,marginTop:9}}>{r.description}</div>
       </Card>)}
     </div>}
+  </div>;
+}
+
+function SupLabourMaster({data,persist,sup,notify}) {
+  const rows=(data.labour||[]).filter(l=>l.supervisorId===sup.id).sort((a,b)=>(b.dateAdded||"").localeCompare(a.dateAdded||""));
+  const update=(id,patch)=>{persist({...data,labour:(data.labour||[]).map(l=>l.id===id?{...l,...patch,updatedAt:new Date().toISOString()}:l)}); notify("Labour record updated.");};
+  return <div>
+    <SectionTitle sub="Manpower you've deployed/hired — update onboarding status, UAN & ESIC">ESIC & EPF</SectionTitle>
+    {rows.length===0 ? <Empty title="No labour submitted yet"/> : rows.map(l=>(
+      <Card key={l.id} style={{padding:14,marginBottom:10}}>
+        <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+          <div><b>{l.name}</b><div style={{fontSize:11.5,color:COLORS.inkMute,marginTop:2}}>{l.fatherName} • {l.contactNumber}</div></div>
+          <Badge tone={l.onboardingStatus==="Onboarded"?"green":l.onboardingStatus==="Left Before Onboarding"?"red":"orange"}>{l.onboardingStatus}</Badge>
+        </div>
+        <div style={{fontSize:11.5,color:COLORS.inkMute,marginBottom:12}}>Client: {l.clientName} • Added {l.dateAdded?fmtDate(l.dateAdded):"—"}</div>
+        <Field label="Onboarding status">
+          <select value={l.onboardingStatus} onChange={e=>update(l.id,{onboardingStatus:e.target.value})} style={inputStyle}>
+            <option>Pending Onboarding</option><option>Onboarded</option><option>Left Before Onboarding</option>
+          </select>
+        </Field>
+        <Field label="UAN number">
+          <input defaultValue={l.uan} placeholder="UAN number" onBlur={e=>e.target.value!==l.uan && update(l.id,{uan:e.target.value.trim()})} style={inputStyle}/>
+        </Field>
+        <Field label="ESIC number">
+          <input defaultValue={l.esicNumber} placeholder="ESIC number" onBlur={e=>e.target.value!==l.esicNumber && update(l.id,{esicNumber:e.target.value.trim()})} style={inputStyle}/>
+        </Field>
+      </Card>
+    ))}
   </div>;
 }
 
