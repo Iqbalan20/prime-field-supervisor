@@ -1,6 +1,8 @@
 // @ts-nocheck
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { storage, loadRemoteData } from "./lib/storage";
+import L from "leaflet";
+import "leaflet/dist/leaflet.css";
 import { signInWithPassword, getSession as getSupabaseSession, signOut as supabaseSignOut, supabaseConfigured, createAuthAccount } from "./lib/supabase";
 
 /* ============================================================
@@ -455,86 +457,76 @@ function Toast({ toast }) {
    This is a lightweight in-house map visual (no external tile dependency);
    swap for Mapbox/Google Maps/Leaflet in production via the same lat/lng props. */
 function GeoMap({ sites, supervisors, activeSiteId, onSelectSite, height = 260, locationRecords = [] }) {
-  const pts = sites.map((s) => ({ lat: s.lat, lng: s.lng }));
-  const lats = pts.map((p) => p.lat);
-  const lngs = pts.map((p) => p.lng);
-  const pad = 0.015;
-  const minLat = Math.min(...lats) - pad, maxLat = Math.max(...lats) + pad;
-  const minLng = Math.min(...lngs) - pad, maxLng = Math.max(...lngs) + pad;
-  const toXY = (lat, lng) => {
-    const x = ((lng - minLng) / (maxLng - minLng)) * 100;
-    const y = 100 - ((lat - minLat) / (maxLat - minLat)) * 100;
-    return [x, y];
-  };
+  const containerRef = useRef(null);
+  const mapRef = useRef(null);
+  const layerRef = useRef(null);
+
+  // Init the map once.
+  useEffect(() => {
+    if (!containerRef.current || mapRef.current) return;
+    const map = L.map(containerRef.current, { zoomControl: true, attributionControl: true });
+    L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+      maxZoom: 19,
+      attribution: "Tiles &copy; Esri — Source: Esri, Maxar, Earthstar Geographics",
+    }).addTo(map);
+    mapRef.current = map;
+    layerRef.current = L.layerGroup().addTo(map);
+    return () => { map.remove(); mapRef.current = null; };
+  }, []);
+
+  // Redraw markers whenever the data changes, without recreating the map/tiles.
+  useEffect(() => {
+    const map = mapRef.current, layer = layerRef.current;
+    if (!map || !layer) return;
+    layer.clearLayers();
+
+    const bounds = [];
+    sites.forEach((s) => {
+      bounds.push([s.lat, s.lng]);
+      const isActive = s.id === activeSiteId;
+      const icon = L.divIcon({
+        className: "",
+        html: `<div style="width:${isActive ? 16 : 11}px;height:${isActive ? 16 : 11}px;border-radius:50% 50% 50% 0;background:${COLORS.navy2};transform:rotate(-45deg);box-shadow:${isActive ? "0 0 0 6px rgba(226,121,46,0.3)" : "0 1px 3px rgba(0,0,0,0.4)"};border:1.5px solid #fff;"></div>`,
+        iconSize: [isActive ? 16 : 11, isActive ? 16 : 11],
+        iconAnchor: [isActive ? 8 : 5.5, isActive ? 16 : 11],
+      });
+      const marker = L.marker([s.lat, s.lng], { icon }).addTo(layer);
+      marker.bindTooltip(`${s.name} — ${s.client}`, { direction: "top", offset: [0, -10] });
+      if (onSelectSite) marker.on("click", () => onSelectSite(s.id));
+    });
+
+    supervisors.forEach((sup) => {
+      const site = sites.find((s) => s.id === sup.assignedSiteIds?.[0]);
+      if (!site) return;
+      const live = locationRecords.find((a) => a.supervisorId === sup.id && a.status === "On Duty");
+      const lat = live?.currentLat ?? site.lat, lng = live?.currentLng ?? site.lng;
+      const online = sup.status === "Active";
+      bounds.push([lat, lng]);
+      const icon = L.divIcon({
+        className: "",
+        html: `<div style="width:11px;height:11px;border-radius:99px;background:${online ? COLORS.success : "#98A2B3"};border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,0.4);"></div>`,
+        iconSize: [11, 11],
+        iconAnchor: [5.5, 5.5],
+      });
+      L.marker([lat, lng], { icon }).addTo(layer).bindTooltip(sup.name, { direction: "top", offset: [0, -6] });
+    });
+
+    if (bounds.length === 1) map.setView(bounds[0], 15);
+    else if (bounds.length > 1) map.fitBounds(bounds, { padding: [30, 30], maxZoom: 16 });
+  }, [sites, supervisors, activeSiteId, locationRecords, onSelectSite]);
+
+  // Leaflet needs an explicit size recalculation if the container was hidden/resized.
+  useEffect(() => {
+    const t = setTimeout(() => mapRef.current?.invalidateSize(), 60);
+    return () => clearTimeout(t);
+  }, [height]);
+
   return (
-    <div style={{ position: "relative", height, borderRadius: 12, overflow: "hidden", background: "linear-gradient(135deg,#EAF0F8,#F6F8FB)", border: `1px solid ${COLORS.line}` }}>
-      <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none" style={{ position: "absolute", inset: 0 }}>
-        {[...Array(6)].map((_, i) => (
-          <line key={"h" + i} x1="0" y1={i * 20} x2="100" y2={i * 20} stroke="#DCE3EC" strokeWidth="0.3" />
-        ))}
-        {[...Array(6)].map((_, i) => (
-          <line key={"v" + i} x1={i * 20} y1="0" x2={i * 20} y2="100" stroke="#DCE3EC" strokeWidth="0.3" />
-        ))}
-      </svg>
-      {sites.map((s) => {
-        const [x, y] = toXY(s.lat, s.lng);
-        const isActive = s.id === activeSiteId;
-        return (
-          <div
-            key={s.id}
-            onClick={() => onSelectSite && onSelectSite(s.id)}
-            title={s.name}
-            style={{
-              position: "absolute",
-              left: `${x}%`,
-              top: `${y}%`,
-              transform: "translate(-50%,-100%)",
-              cursor: onSelectSite ? "pointer" : "default",
-              zIndex: isActive ? 5 : 2,
-            }}
-          >
-            <div
-              style={{
-                width: isActive ? 14 : 10,
-                height: isActive ? 14 : 10,
-                borderRadius: "50% 50% 50% 0",
-                background: COLORS.navy2,
-                transform: "rotate(-45deg)",
-                boxShadow: isActive ? `0 0 0 5px rgba(226,121,46,0.25)` : "0 1px 3px rgba(0,0,0,0.25)",
-              }}
-            />
-          </div>
-        );
-      })}
-      {supervisors.map((sup) => {
-        const site = sites.find((s) => s.id === sup.assignedSiteIds[0]);
-        if (!site) return null;
-        const live = locationRecords.find(a => a.supervisorId === sup.id && a.status === "On Duty");
-        const lat = live?.currentLat ?? site.lat, lng = live?.currentLng ?? site.lng;
-        const [x, y] = toXY(lat, lng);
-        const online = sup.status === "Active";
-        return (
-          <div
-            key={sup.id}
-            title={sup.name}
-            style={{ position: "absolute", left: `${x}%`, top: `${y}%`, transform: "translate(-50%,-50%)", zIndex: 3 }}
-          >
-            <div
-              style={{
-                width: 9,
-                height: 9,
-                borderRadius: 99,
-                background: online ? COLORS.success : "#98A2B3",
-                border: "2px solid #fff",
-                boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
-              }}
-            />
-          </div>
-        );
-      })}
-      <div style={{ position: "absolute", bottom: 8, left: 10, fontSize: 10.5, color: COLORS.inkMute, fontFamily: "IBM Plex Mono, monospace", display: "flex", gap: 10 }}>
+    <div style={{ position: "relative", height, borderRadius: 12, overflow: "hidden", border: `1px solid ${COLORS.line}` }}>
+      <div ref={containerRef} style={{ width: "100%", height: "100%", background: "#EAF0F8" }} />
+      <div style={{ position: "absolute", bottom: 8, left: 10, zIndex: 1000, fontSize: 10.5, color: "#fff", textShadow: "0 1px 2px rgba(0,0,0,0.8)", fontFamily: "IBM Plex Mono, monospace", display: "flex", gap: 10, pointerEvents: "none" }}>
         <span>◆ site</span>
-        <span style={{ color: COLORS.success }}>● supervisor online</span>
+        <span>● supervisor online</span>
       </div>
     </div>
   );
@@ -588,6 +580,24 @@ export default function App() {
     setData(next);
     saveData(next);
   }, []);
+
+  // Background sync: without this, one session's changes (a supervisor
+  // clocking in, management adding a site) never appear in an already-open
+  // session on the other side until a manual page reload. Poll every 20s
+  // and quietly merge in whatever's changed server-side.
+  const dataRef = useRef(data);
+  useEffect(() => { dataRef.current = data; }, [data]);
+  useEffect(() => {
+    if (!session || !supabaseConfigured) return;
+    const isManagement = session.role !== "SUPERVISOR";
+    const interval = setInterval(async () => {
+      try {
+        const remote = await loadRemoteData(dataRef.current, isManagement);
+        if (remote) setData(remote);
+      } catch (e) { console.warn("Background sync failed", e); }
+    }, 20000);
+    return () => clearInterval(interval);
+  }, [session?.role]);
 
   const notify = useCallback((msg, type = "success") => {
     setToast({ msg, type });
@@ -940,16 +950,36 @@ function SupCheckIn({ data, persist, sup, siteId, openVisit, notify, onDone }) {
   const activeVisit = openVisit || null;
   const site = data.sites.find(s => s.id === (activeVisit?.siteId || selectedSiteId));
 
+  const [geoError, setGeoError] = useState("");
   const locate = () => {
     if (!site) return;
     setGeoStatus("locating");
-    if (!navigator.geolocation) { setGeoStatus("error"); return; }
-    navigator.geolocation.getCurrentPosition(pos => {
-      const {latitude,longitude,accuracy} = pos.coords;
-      setCoords({lat:latitude,lng:longitude,accuracy});
-      setDistance(Math.round(haversineMeters(latitude,longitude,site.lat,site.lng)));
+    setGeoError("");
+    if (!navigator.geolocation) { setGeoStatus("error"); setGeoError("This browser doesn't support location services."); return; }
+
+    const onOk = (pos) => {
+      const { latitude, longitude, accuracy } = pos.coords;
+      setCoords({ lat: latitude, lng: longitude, accuracy });
+      setDistance(Math.round(haversineMeters(latitude, longitude, site.lat, site.lng)));
       setGeoStatus("ok");
-    }, () => setGeoStatus("error"), {enableHighAccuracy:true,timeout:10000,maximumAge:0});
+    };
+    const messageFor = (err) => {
+      if (err.code === 1) return "Location permission denied — enable it for this site in your browser/app settings.";
+      if (err.code === 2) return "GPS signal unavailable — try moving outdoors or near a window.";
+      return "Location request timed out — retrying with a faster, lower-accuracy method…";
+    };
+
+    // First attempt: high accuracy GPS, generous timeout.
+    navigator.geolocation.getCurrentPosition(onOk, (err) => {
+      setGeoError(messageFor(err));
+      if (err.code === 1) { setGeoStatus("error"); return; } // permission denied — retrying won't help
+      // Fallback attempt: lower accuracy (network/cell-based), which is faster and more
+      // reliable indoors — this is what was missing before and caused clock-out failures.
+      navigator.geolocation.getCurrentPosition(onOk, (err2) => {
+        setGeoStatus("error");
+        setGeoError(messageFor(err2));
+      }, { enableHighAccuracy: false, timeout: 20000, maximumAge: 60000 });
+    }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
   };
 
   const startCamera = async () => {
@@ -1016,7 +1046,7 @@ function SupCheckIn({ data, persist, sup, siteId, openVisit, notify, onDone }) {
       </div>
       {geoStatus==="idle" && <Button onClick={locate} style={{width:"100%"}}>Get live location</Button>}
       {geoStatus==="locating" && <Button disabled style={{width:"100%"}}>Getting live location…</Button>}
-      {geoStatus==="error" && <><div style={{color:COLORS.danger,fontSize:12,marginBottom:8}}>Location permission or GPS failed.</div><Button variant="ghost" onClick={locate} style={{width:"100%"}}>Try again</Button></>}
+      {geoStatus==="error" && <><div style={{color:COLORS.danger,fontSize:12,marginBottom:8}}>{geoError || "Location permission or GPS failed."}</div><Button variant="ghost" onClick={locate} style={{width:"100%"}}>Try again</Button></>}
       {geoStatus==="ok" && distance>site.geofenceM && <div style={{color:COLORS.danger,fontSize:12}}>You are outside the allowed geofence.</div>}
       {geoStatus==="ok" && distance<=site.geofenceM && <div style={{color:COLORS.success,fontSize:12,fontWeight:700}}>Location verified {coords?.accuracy?`• accuracy ±${Math.round(coords.accuracy)}m`:""}</div>}
     </Card>
@@ -1228,7 +1258,7 @@ function SupDailyReport({ data, persist, sup, mySites, notify, goHome }) {
   const tasksCompleted = data.tasks.filter((t) => t.supervisorId === sup.id && t.status === "Completed").length;
   const issuesToday = data.incidents.filter((i) => i.supervisorId === sup.id && i.date.slice(0, 10) === today).length;
   const [remarks, setRemarks] = useState("");
-  const already = data.reports.find((r) => r.supervisorId === sup.id && r.date === today);
+  const alreadyCount = data.reports.filter((r) => r.supervisorId === sup.id && r.date === today).length;
   const defaultClient = mySites[0]?.client || "";
   const defaultSiteId = mySites[0]?.id || "";
   const blankRow = () => ({ key: uid("row"), name: "", fatherName: "", contact: "", clientName: defaultClient, siteId: defaultSiteId });
@@ -1248,6 +1278,7 @@ function SupDailyReport({ data, persist, sup, mySites, notify, goHome }) {
       return;
     }
     const nextLabour = [...(data.labour || [])];
+    const nextEmployees = [...(data.employees || [])];
     const labourIds = [];
     for (const row of labourRows) {
       const normalized = normalizePhone(row.contact);
@@ -1270,6 +1301,23 @@ function SupDailyReport({ data, persist, sup, mySites, notify, goHome }) {
         };
         nextLabour.push(rec);
         labourIds.push(rec.id);
+        // Also add them to the site's Employee roster so they immediately show
+        // up in the Employees list and become available for attendance marking —
+        // matched by the same phone-number key so this stays in sync with labour.
+        if (row.siteId && !nextEmployees.some((e) => e._labourId === rec.id)) {
+          nextEmployees.push({
+            id: uid("emp"),
+            empId: `EMP-${String(nextEmployees.length + 1).padStart(6, "0")}`,
+            name: rec.name,
+            designation: "Labour",
+            client: rec.clientName,
+            siteId: rec.siteId,
+            shift: "Day (9-6)",
+            status: "Active",
+            supervisorId: sup.id,
+            _labourId: rec.id,
+          });
+        }
       }
     }
     const report = {
@@ -1288,8 +1336,9 @@ function SupDailyReport({ data, persist, sup, mySites, notify, goHome }) {
     };
     persist({
       ...data,
-      reports: [report, ...data.reports.filter((r) => !(r.supervisorId === sup.id && r.date === today))],
+      reports: [report, ...data.reports],
       labour: nextLabour,
+      employees: nextEmployees,
     });
     notify(labourIds.length ? `Daily report submitted with ${labourIds.length} manpower record(s).` : "Daily report submitted.");
     goHome();
@@ -1345,7 +1394,7 @@ function SupDailyReport({ data, persist, sup, mySites, notify, goHome }) {
       <Field label="Additional remarks / client feedback">
         <textarea value={remarks} onChange={(e) => setRemarks(e.target.value)} rows={4} placeholder="Notes for management…" style={{ ...inputStyle, resize: "vertical" }} />
       </Field>
-      {already && <div style={{ fontSize: 11.5, color: COLORS.warning, marginBottom: 10 }}>A report was already submitted today — submitting again will replace it.</div>}
+      {alreadyCount > 0 && <div style={{ fontSize: 11.5, color: COLORS.warning, marginBottom: 10 }}>You've already submitted {alreadyCount} report{alreadyCount > 1 ? "s" : ""} today — this will be added as an additional one, not a replacement.</div>}
       <Button variant="amber" style={{ width: "100%" }} disabled={incompleteRow} onClick={submit}>Submit daily report</Button>
     </div>
   );
@@ -1903,10 +1952,7 @@ function SupervisorsPage({ data, persist, notify }) {
           <KPI label="Incidents Reported" value={incidents.length} />
           <KPI label="Assigned Sites" value={mySites.length} />
         </div>
-        <Card style={{ padding: 16 }}>
-          <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 8 }}>Assigned sites</div>
-          {mySites.map((s) => <div key={s.id} style={{ padding: "7px 0", fontSize: 12.5, borderBottom: `1px solid ${COLORS.line}` }}>{s.name} — {s.client}</div>)}
-        </Card>
+        <EditSupervisorAssignment data={data} persist={persist} notify={notify} sup={sup} />
       </div>
     );
   }
@@ -1932,6 +1978,50 @@ function SupervisorsPage({ data, persist, notify }) {
         </Table>
       </Card>
     </div>
+  );
+}
+
+function EditSupervisorAssignment({ data, persist, notify, sup }) {
+  const [assignedSiteIds, setAssignedSiteIds] = useState(sup.assignedSiteIds || []);
+  const [status, setStatus] = useState(sup.status);
+  const dirty = JSON.stringify([...assignedSiteIds].sort()) !== JSON.stringify([...(sup.assignedSiteIds || [])].sort()) || status !== sup.status;
+
+  const toggleSite = (id) => setAssignedSiteIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]));
+
+  const save = () => {
+    const updatedSites = data.sites.map((s) => {
+      const isNowAssigned = assignedSiteIds.includes(s.id);
+      const wasAssignedToThisSup = s.supervisorId === sup.id;
+      if (isNowAssigned) return { ...s, supervisorId: sup.id };
+      if (wasAssignedToThisSup) return { ...s, supervisorId: null };
+      return s;
+    });
+    persist({
+      ...data,
+      supervisors: data.supervisors.map((s) => (s.id === sup.id ? { ...s, assignedSiteIds, status } : s)),
+      sites: updatedSites,
+    });
+    notify("Supervisor assignment updated.");
+  };
+
+  return (
+    <Card style={{ padding: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={{ fontWeight: 700, fontSize: 13.5 }}>Assigned sites</div>
+        <select value={status} onChange={(e) => setStatus(e.target.value)} style={{ padding: "5px 10px", borderRadius: 7, border: `1px solid ${COLORS.line}`, fontSize: 11.5 }}>
+          <option>Active</option><option>Inactive</option>
+        </select>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
+        {data.sites.map((s) => (
+          <label key={s.id} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, border: `1px solid ${COLORS.line}`, borderRadius: 8, padding: "6px 10px", cursor: "pointer", background: assignedSiteIds.includes(s.id) ? "#FDF1E3" : "#fff" }}>
+            <input type="checkbox" checked={assignedSiteIds.includes(s.id)} onChange={() => toggleSite(s.id)} />
+            {s.name} — {s.client}
+          </label>
+        ))}
+      </div>
+      <Button variant="amber" disabled={!dirty} onClick={save}>Save changes</Button>
+    </Card>
   );
 }
 
